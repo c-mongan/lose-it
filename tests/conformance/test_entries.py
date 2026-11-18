@@ -27,7 +27,7 @@ def test_log_food_request_shape(test_client, httpx_mock, fixture_text):
         serving_qty=1.0,
         food_measure_ordinal=27,
     )
-    entries.log_food(
+    entry_id = entries.log_food(
         test_client.http,
         unsaved,
         meal_ordinal=3,
@@ -37,6 +37,9 @@ def test_log_food_request_shape(test_client, httpx_mock, fixture_text):
     )
 
     body = httpx_mock.get_request().content.decode()
+    pk = bytes.fromhex(entry_id)
+    assert len(pk) == 16
+    assert body.endswith("|" + "|".join(str(b if b < 128 else b - 256) for b in reversed(pk)) + "|")
     assert "updateFoodLogEntry" in body
     # ServiceRequestToken always carries user_id + hours_from_gmt.
     assert f"|{test_client.config.user_id}|" in body

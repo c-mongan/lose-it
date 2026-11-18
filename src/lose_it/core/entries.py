@@ -38,6 +38,8 @@ def _build_log_payload(
     measure_ord_override: int | None = None,
     quantity_in_chosen_unit: float | None = None,
     conversion_factor: float | None = None,
+    *,
+    entry_uuid: uuid.UUID | None = None,
 ) -> str:
     """Build the ``updateFoodLogEntry`` envelope.
 
@@ -82,7 +84,7 @@ def _build_log_payload(
     # against our wire dump (pre-scaled, e.g. cal=207). The UI does not
     # pre-scale.
     nutrients = {k: v for k, v in (unsaved.nutrients or {}).items() if k in _CORE_NUTRIENT_ORDINALS}
-    entry_pk = _uuid_signed_bytes(uuid.uuid4())
+    entry_pk = _uuid_signed_bytes(entry_uuid or uuid.uuid4())
 
     strings = [
         config.base_url,  # 1
@@ -240,7 +242,7 @@ def log_food(
     measure_ord_override: int | None = None,
     quantity_in_chosen_unit: float | None = None,
     conversion_factor: float | None = None,
-) -> None:
+) -> str:
     """Log ``unsaved`` to the given meal/day with ``servings`` portions.
 
     The trailing three parameters implement the unit-override flow (see
@@ -271,6 +273,7 @@ def log_food(
         udk=unsaved.day_key,
         ni=len(unsaved.nutrients or {}),
     )
+    entry_uuid = uuid.uuid4()
     http.post_rpc(
         _build_log_payload(
             http.config,
@@ -282,8 +285,10 @@ def log_food(
             measure_ord_override=measure_ord_override,
             quantity_in_chosen_unit=quantity_in_chosen_unit,
             conversion_factor=conversion_factor,
+            entry_uuid=entry_uuid,
         )
     )
+    return entry_uuid.hex
 
 
 # ── deleteFoodLogEntry ──────────────────────────────────────────────────────

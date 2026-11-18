@@ -433,10 +433,11 @@ class LoseIt:
         )
         calories = scaled_calories(unsaved, portion.canonical_servings)
 
+        entry_id = None
         if not dry_run:
             day_num = day_number_for(when)
             day_key = get_daydate_key(self.http, day_num) or ""
-            _entries.log_food(
+            entry_id = _entries.log_food(
                 self.http,
                 unsaved,
                 int(meal_type),
@@ -449,6 +450,7 @@ class LoseIt:
             )
 
         return LoggedFood(
+            entry_id=entry_id,
             food=food,
             meal_ordinal=int(meal_type),
             meal_name=meal_type.name,

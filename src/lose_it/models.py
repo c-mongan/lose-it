@@ -334,6 +334,7 @@ class LoggedFood:
     portion_unit: str
     calories: float | None
     dry_run: bool
+    entry_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe projection. Mirrors the ``loseit log --output json``
@@ -341,6 +342,7 @@ class LoggedFood:
         the kind of event regardless of which command produced it."""
         return {
             "action": "log",
+            **({"entry_id": self.entry_id} if self.entry_id is not None else {}),
             "dry_run": self.dry_run,
             "date": self.when,
             "meal": self.meal_name,
