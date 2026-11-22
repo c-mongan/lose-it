@@ -52,8 +52,8 @@ def test_defaults_apply_when_required_supplied_via_init(tmp_path: Path) -> None:
     )
     assert s.base_url == BASE_URL
     assert s.service_url == SERVICE_URL
-    assert s.policy_hash == "8F87EC8969F17AE77B6283D3A83F6D4C"
-    assert s.strong_name == "351AE5DC0CA36AD3BA9C7CBA7B0E07B8"
+    assert s.policy_hash == "48B8773EE1A2315CAE592AD337015120"
+    assert s.strong_name == "11A17D1DFC9DAA0636F4DEA4FB06063B"
 
 
 def test_missing_required_fields_raise(tmp_path: Path) -> None:
