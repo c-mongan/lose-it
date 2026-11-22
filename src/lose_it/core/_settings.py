@@ -71,8 +71,8 @@ class Settings(BaseSettings):
     hours_from_gmt: int | None = None
 
     # ── Per-build (refreshed when LoseIt redeploys) ──
-    policy_hash: str = "8F87EC8969F17AE77B6283D3A83F6D4C"
-    strong_name: str = "351AE5DC0CA36AD3BA9C7CBA7B0E07B8"
+    policy_hash: str = "48B8773EE1A2315CAE592AD337015120"
+    strong_name: str = "11A17D1DFC9DAA0636F4DEA4FB06063B"
 
     # ── URLs (rarely overridden; exposed for testing) ──
     base_url: str = BASE_URL
