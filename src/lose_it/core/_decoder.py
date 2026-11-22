@@ -9,10 +9,11 @@ field lands in the right slot by construction.
 Inputs
 ------
 
-- ``_schemas.json``  — written by ``tools/extract_gwt_schemas.py``,
+- ``_schemas.json``  — written by ``loseit build --schemas-out``,
   contains ``{fqcn: {"deserialize_fn": "...", "fields": [...]}}`` for
   every Lose It! domain type plus all the relevant Java built-ins.
-  This file is the ground truth and changes only when Lose It! redeploys.
+  After a Lose It! redeploy, unknown types are filled in at runtime from
+  the live build (see :mod:`._build`).
 - A raw ``//OK[…]`` GWT-RPC response body, parsed via
   :func:`lose_it.core._gwt.parse_response` into a flat token
   list and a separate string table.
@@ -54,13 +55,36 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
 
+from .._logging import logger
 from ._enums import label_for_ordinal
 from ._gwt import parse_response
+from ._http import LoseItError
+
+
+class SchemaChangedError(LoseItError):
+    """A class the SDK maps by field position changed shape in a redeploy.
+
+    Its new fields can be decoded, but the positional meanings (``f3`` = name,
+    …) were derived for the pinned signature, so reading them would return
+    wrong or silently missing data. Raised even in lenient decoding.
+    """
+
+
+# Class name → the one type signature the SDK's positional field mappings
+# were derived for. Filled by :func:`semantic` from the parser modules.
+_SEMANTIC: dict[str, str] = {}
+
+
+def semantic(signature: str) -> str:
+    """Register a type signature the SDK reads by field position; return it."""
+    _SEMANTIC[signature.rsplit("/", 1)[0]] = signature
+    return signature
+
 
 # FQCNs whose decoded objects get a plain-English label attached next to
 # their raw ``ordinal``. Surfaces in ``loseit -o json`` output and in
 # any downstream parser that walks the decoded tree.
-_FOOD_MEASURE_FQCN = "com.loseit.core.client.model.FoodMeasure/1457474932"
+_FOOD_MEASURE_FQCN = semantic("com.loseit.core.client.model.FoodMeasure/1457474932")
 
 
 @dataclass
@@ -77,17 +101,20 @@ class _Catalog:
     permutation: str
     schemas: dict[str, _Schema] = field(default_factory=dict)
 
+    def add(self, schemas: dict[str, dict[str, Any]]) -> None:
+        for fqcn, info in schemas.items():
+            self.schemas[fqcn] = _Schema(
+                fqcn=fqcn,
+                fields=info["fields"],
+                is_enum=bool(info.get("is_enum", False)),
+            )
+
     @classmethod
     def load(cls) -> _Catalog:
         with resources.files(__package__).joinpath("_schemas.json").open() as f:
             data = json.load(f)
         cat = cls(permutation=data["permutation"])
-        for fqcn, info in data["schemas"].items():
-            cat.schemas[fqcn] = _Schema(
-                fqcn=fqcn,
-                fields=info["fields"],
-                is_enum=bool(info.get("is_enum", False)),
-            )
+        cat.add(data["schemas"])
         return cat
 
 
@@ -99,6 +126,49 @@ def _catalog() -> _Catalog:
     if _CATALOG is None:
         _CATALOG = _Catalog.load()
     return _CATALOG
+
+
+def register_schemas(schemas: dict[str, dict[str, Any]]) -> None:
+    """Overlay schemas extracted from the live build onto the bundled ones."""
+    _catalog().add(schemas)
+
+
+_LIVE_LOOKUP_TRIED: set[str] = set()
+
+
+def _schema_for(fqcn: str) -> _Schema:
+    """Look up ``fqcn``; on a miss, load the live build's schemas once and retry.
+
+    A type signature the bundled table lacks means Lose It! redeployed and a
+    class changed shape, so the live bundles are the only correct source.
+    Each unknown signature triggers at most one fresh discovery per process.
+    If discovery fails (offline, CDN change), the miss stays a ``KeyError`` so
+    lenient decoding keeps returning partial results.
+    Types the SDK reads by field position (:func:`semantic`) must keep their
+    pinned signature; a changed one raises :class:`SchemaChangedError`.
+    """
+    pinned = _SEMANTIC.get(fqcn.rsplit("/", 1)[0])
+    if pinned is not None and pinned != fqcn:
+        raise SchemaChangedError(
+            f"Could not decode {fqcn}: Lose It! changed this type (the SDK's field "
+            f"mapping is for {pinned}). The lose-it parsers need an update."
+        )
+    schema = _catalog().schemas.get(fqcn)
+    if schema is None and fqcn not in _LIVE_LOOKUP_TRIED:
+        import httpx
+
+        from . import _build
+
+        _LIVE_LOOKUP_TRIED.add(fqcn)
+        if _build.auto_refresh_enabled():
+            try:
+                _build.refresh(force=True)
+            except (_build.BuildDiscoveryError, httpx.HTTPError, OSError) as exc:
+                logger.warning("Live schema lookup for {f} failed: {e}", f=fqcn, e=exc)
+            schema = _catalog().schemas.get(fqcn)
+    if schema is None:
+        raise KeyError(f"No schema for {fqcn!r} in the bundled or live Lose It! build schemas.")
+    return schema
 
 
 # ── Built-in type handling ───────────────────────────────────────────────────
@@ -368,12 +438,7 @@ def _read_typed(reader: _Reader, fqcn: str) -> Any:
         obj["entries"] = entries
         return obj
 
-    schema = _catalog().schemas.get(fqcn)
-    if schema is None:
-        raise KeyError(
-            f"No schema for {fqcn!r}. Regenerate _schemas.json via "
-            "tools/extract_gwt_schemas.py — Lose It! may have added a new type."
-        )
+    schema = _schema_for(fqcn)
     # Enums encode their ordinal as one extra token consumed by the GWT
     # *instantiate* function (not the deserialize body). Mirror that here
     # before reading any other fields.

@@ -5,7 +5,10 @@ Provides one method, :meth:`HttpClient.post_rpc`, that handles:
 - the constant GWT headers (``content-type``, ``x-gwt-permutation``, etc.),
 - attaching the ``liauth`` cookie to every request,
 - recognizing GWT-level ``//EX`` error responses and surfacing them as
-  exceptions instead of returning a body the caller has to re-check.
+  exceptions instead of returning a body the caller has to re-check,
+- recovering from a Lose It! web redeploy: an
+  ``IncompatibleRemoteServiceException`` makes it adopt the live build's
+  strong name + policy hash (see :mod:`._build`) and retry once.
 
 Every call emits structured loguru events: TRACE dumps the full request
 + response (headers, cookies, body), DEBUG keeps a one-liner, INFO marks
@@ -15,11 +18,13 @@ the RPC + duration, ERROR captures non-OK responses with the body.
 from __future__ import annotations
 
 import re
+import threading
 import time
 
 import httpx
 
 from .._logging import headers_enabled, logger
+from . import _build
 from ._config import Config
 
 # A GWT-RPC envelope's first ``|``-delimited field is its method name as
@@ -69,6 +74,7 @@ class HttpClient:
 
     def __init__(self, config: Config, token: str, *, transport: httpx.BaseTransport | None = None):
         self.config = config
+        self._adopt_lock = threading.Lock()
         self.token = token
         headers = {
             "content-type": "text/x-gwt-rpc; charset=UTF-8",
@@ -110,10 +116,53 @@ class HttpClient:
         Raises :class:`LoseItAuthError` on 401/403, :class:`LoseItError` on
         any other non-OK response (including GWT-level ``//EX[…]`` errors).
 
-        TRACE logs the full request (method, URL, all headers, cookies, body)
-        and full response (status, headers, body). DEBUG logs a one-liner.
-        INFO logs an RPC-level event with duration + sizes.
+        When the server rejects the build identifiers
+        (``IncompatibleRemoteServiceException``), switch this client to the
+        live build's identifiers and resend the envelope once with the new
+        policy hash. Disable with ``LOSEIT_AUTO_REFRESH=0``.
         """
+        # Policy hash is string-table entry 2 (``7|0|N|<base>|<policy>|…``).
+        fields = payload.split("|", 5)
+        sent_policy = self.config.policy_hash
+        if len(fields) > 4 and re.fullmatch(r"[0-9A-F]{32}", fields[4]):
+            sent_policy = fields[4]
+        try:
+            return self._post_once(payload)
+        except LoseItError as exc:
+            if "IncompatibleRemoteServiceException" not in str(exc):
+                raise
+            if not _build.auto_refresh_enabled():
+                raise
+            with self._adopt_lock:
+                # A concurrent call may already have moved this client on.
+                if self.config.policy_hash == sent_policy:
+                    try:
+                        adopted = self._adopt_live_build()
+                    except (_build.BuildDiscoveryError, httpx.HTTPError) as discovery_exc:
+                        logger.error("Lose It! build refresh failed: {e}", e=discovery_exc)
+                        raise exc from discovery_exc
+                    if not adopted:
+                        raise
+                current = self.config.policy_hash
+            return self._post_once(payload.replace(f"|{sent_policy}|", f"|{current}|"))
+
+    def _adopt_live_build(self) -> bool:
+        """Point this client at the live build; False if it already was.
+
+        Always re-reads ``web.nocache.js``: the server just rejected our IDs,
+        so any memoized discovery may predate another redeploy.
+        """
+        current = (self.config.strong_name, self.config.policy_hash)
+        ids = _build.refresh(self.config.base_url, force=True)
+        if (ids.strong_name, ids.policy_hash) == current:
+            return False
+        self.config = self.config.model_copy(
+            update={"strong_name": ids.strong_name, "policy_hash": ids.policy_hash}
+        )
+        self._client.headers["x-gwt-permutation"] = ids.strong_name
+        return True
+
+    def _post_once(self, payload: str) -> str:
         url = self.config.service_url
         method_name = _extract_rpc_method(payload)
         request_size = len(payload)

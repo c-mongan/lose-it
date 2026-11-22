@@ -1443,6 +1443,45 @@ def whoami(ctx: typer.Context) -> None:
         typer.echo(f"strong_name    : {cfg.strong_name}")
 
 
+@app.command()
+def build(
+    ctx: typer.Context,
+    schemas_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--schemas-out",
+            help="Also extract the live build's GWT schemas to this JSON file "
+            "(maintainers: src/lose_it/core/_schemas.json).",
+        ),
+    ] = None,
+) -> None:
+    """Show Lose It!'s live web build IDs (no account needed).
+
+    The client adopts these automatically when the server rejects stale ones;
+    use this to check a deployment or to refresh the bundled defaults.
+    """
+    from .core import _build
+
+    fmt = _output_format(ctx)
+    ids = _build.discover_build_ids()
+    data: dict[str, Any] = {"strong_name": ids.strong_name, "policy_hash": ids.policy_hash}
+    if schemas_out is not None:
+        payload = _build.extract_schemas(_build.BASE_URL, ids.strong_name)
+        if schemas_out.exists():
+            # Keep signatures from retired builds so older captures still decode.
+            previous = json.loads(schemas_out.read_text()).get("schemas", {})
+            payload["schemas"] = previous | payload["schemas"]
+        schemas_out.parent.mkdir(parents=True, exist_ok=True)
+        schemas_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        data["schemas"] = len(payload["schemas"])
+        data["schemas_out"] = str(schemas_out)
+    if fmt is not OutputFormat.text:
+        _emit_structured(fmt, data)
+    else:
+        for key, value in data.items():
+            typer.echo(f"{key:<14} : {value}")
+
+
 # ── Backup / restore-backup helpers ────────────────────────────────────────
 
 

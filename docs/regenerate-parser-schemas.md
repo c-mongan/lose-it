@@ -1,107 +1,82 @@
-# Runbook: regenerate the GWT-RPC parser schemas
+# Runbook: Lose It! web redeploys (build IDs + parser schemas)
 
-The decoder in `src/lose_it/client/_decoder.py` is driven by
-`_schemas.json`, which is extracted once from Lose It!'s compiled JS
-bundle. The schemas only need refreshing when Lose It! redeploys their web
-client.
+The SDK speaks Lose It!'s private GWT-RPC protocol. Every web redeploy can
+change three things it depends on:
 
-## 1. When to re-run
+| What | Where it comes from | Symptom when stale |
+|---|---|---|
+| permutation strong name (`x-gwt-permutation`) | `web.nocache.js` | none observed (server accepts any permutation) |
+| serialization policy hash (field 2 of every RPC body) | proxy constructor in `<strong_name>.cache.js` | `LoseItError("GWT error: …IncompatibleRemoteServiceException…")` |
+| type signatures + field order (`_schemas.json`) | serializer table in the permutation bundle + `deferredjs/<strong_name>/N.cache.js` | decoder `KeyError: "No schema for 'com.loseit…/<crc>'"` |
 
-Either symptom is a trigger:
+## 1. Automatic recovery (default)
 
-- An RPC call raises `LoseItError("...IncompatibleRemoteServiceException...")`
-  — the on-disk `policy_hash` / `strong_name` no longer match the server.
-- The decoder raises `KeyError: "No schema for 'com.loseit...'"` — Lose It!
-  added a new domain type since the last extraction.
+`lose_it.core._build` derives all three from the public CDN bundles:
 
-You do **not** need to re-run on a cadence. Drive it off the two errors.
+- `HttpClient.post_rpc` catches `IncompatibleRemoteServiceException`,
+  discovers the live strong name + policy hash, switches the client to them,
+  and resends the envelope once.
+- The decoder, on an unknown type signature, extracts the live build's
+  schemas and overlays them on the bundled `_schemas.json`.
 
-## 2. How to re-run + open PR
+Discovery runs at most once per process (again only if the server rejects
+the IDs it found), and extracted schemas are cached per build in
+`$XDG_CACHE_HOME/lose_it/schemas-<strong_name>.json` (default
+`~/.cache/lose_it/`). Pinned `LOSEIT_STRONG_NAME` / `LOSEIT_POLICY_HASH`
+values are only a starting point; they no longer need hand-editing after a
+redeploy. Set `LOSEIT_AUTO_REFRESH=0` to turn recovery off (hermetic tests,
+or to surface redeploys as errors).
+
+## 2. Refresh the bundled defaults
+
+Auto-recovery costs one rejected RPC plus ~7 MB of bundle downloads the first
+time a process meets a new build. To make the new build the default:
 
 ```bash
-# 1. Find the current strong_name (= bundle hash for the `en` locale)
-curl -s "https://d3hsih69yn4d89.cloudfront.net/web/web.nocache.js?v=$(date +%s)" \
-  | grep -oE "ic='[0-9A-F]{32}'"
-#  → ic='351AE5DC0CA36AD3BA9C7CBA7B0E07B8'
-
-# 2. Confirm which deferred fragments the live app loads
-#    (Open https://www.loseit.com in Chrome → DevTools → Network tab,
-#     filter for `deferredjs/`. Note the integer fragment numbers — at the
-#     time of writing the app loads 1, 2, 8, 10.)
-
-# 3. Regenerate the schemas
-python tools/extract_gwt_schemas.py \
-  --permutation <strong_name_from_step_1> \
-  --fragments 1 8 10 \
-  --out src/lose_it/client/_schemas.json
-
-# 4. Update the hard-coded permutation defaults in
-#    src/lose_it/client/_settings.py (`strong_name` and
-#    `policy_hash` — the latter is the 5th `|`-field of any
-#    `/web/service` POST body; grab from DevTools).
-
-# 5. Verify and PR
-uv run pytest --no-cov
-prek run --all-files
-git checkout -b chore/refresh-parser-schemas
-git add src/lose_it/client/_schemas.json \
-        src/lose_it/client/_settings.py
-git commit -m "chore(parser): refresh schemas for permutation <strong_name>"
-git push -u origin HEAD
-gh pr create --title "chore(parser): refresh GWT schemas after Lose It! redeploy"
+uv run loseit build --schemas-out src/lose_it/core/_schemas.json
+#  strong_name    : 11A17D1DFC9DAA0636F4DEA4FB06063B
+#  policy_hash    : 48B8773EE1A2315CAE592AD337015120
+#  schemas        : 374
 ```
 
-## 3. Why this matters — concrete sample
+Copy `strong_name` and `policy_hash` into the `Settings` defaults in
+`src/lose_it/core/_settings.py` (and `tests/conformance/test_settings.py`),
+then:
 
-Before the schema-driven decoder, `loseit search "kodiak"` returned this
-for row 6, picked by string-length / capitalization heuristics:
-
-```
-name     = "Power Cakes"
-brand    = "Pancakes"
-category = "Kodiak"
-```
-
-All three fields are wrong. The heuristic chose `"Power Cakes"` because
-it was the longest string in scope, then `"Pancakes"` because it was the
-next short string starting with a capital — exactly the opposite of what
-the real `SearchResultFood` Java fields hold.
-
-After the schema-driven decoder reads `SearchResultFood.f1`/`.f3`/`.f4` in
-declaration order:
-
-```
-name     = "Power Cakes"
-brand    = "Kodiak"
-category = "Pancakes"
+```bash
+uv run pytest
+git checkout -b chore/refresh-gwt-build
+git add src/lose_it/core/_schemas.json src/lose_it/core/_settings.py tests/conformance/test_settings.py
+git commit -m "chore(parser): refresh defaults for Lose It! build <strong_name>"
 ```
 
-The downstream impact of the broken version: `loseit log "kodiak" --pick 6`
-serialized the wrong `FoodIdentifier` to the server, which either logged
-the diary entry under the wrong food (silent data corruption) or rejected
-the call with a generic `IncompatibleRemoteServiceException`. The schema
-fix eliminates the class entirely — every field lands in its declared
-slot by construction.
+`loseit build` without `--schemas-out` just prints the live IDs (no account
+needed) — handy to check whether a deployment is behind.
 
-## 4. How often will this run?
+## 3. How extraction works
 
-**Estimate: weeks to months between redeploys.** Evidence:
+- **Strong name:** `web.nocache.js` registers permutations as
+  `k([<locale>,<user_agent>],<strong>)` with literals hoisted into variables;
+  we resolve the `gecko1_8` user-agent permutation.
+- **Policy hash:** the app's RPC proxy is constructed as
+  `RemoteServiceProxy.call(this, moduleBase, null, '<policy>', serializer)`;
+  GWT's `remote_logging` proxy has a non-null relative path and is ignored.
+- **Schemas:** bundles are unwrapped from their loader calls; every fragment
+  `deferredjs/<strong>/1..N.cache.js` is read until a 404. The minified
+  stream-reader primitives are identified by their GWT template bodies (not
+  their per-build names): object (`b=a.b[--a.a];if(b<0)`), string
+  (`a>0?b.d[a-1]:null`), boolean (`!!a.b[--a.a]`), double *and* float
+  (`Number(a.b[--a.a])` — there are two), and long (base64 decoder). Each
+  `a[<type const>]=[instantiate, deserialize(, serialize)]` table entry is
+  then read statement by statement, splicing superclass deserializers inline.
 
-- The current bundle was deployed **2026-06-04** (`Last-Modified` header
-  on `<strong_name>.cache.js`). That's 7 days old as of 2026-06-11.
-- Lose It! compiles with **GWT 2.8.2**, released April 2017. They haven't
-  upgraded the compiler in 8+ years — strong signal that the web client
-  is *not* on a continuous-deploy schedule.
-- This repo has carried the same `strong_name` since the first commit
-  (a872dd0, 2026-06-08) through to today with no redeploy observed.
-- The `Cache-Control: max-age=31556926000` on the bundle (≈1000 years)
-  reinforces the same conclusion: each bundle is content-addressed and
-  effectively immutable, with new deploys served under a new URL.
+The previous extractor matched hard-coded minified names and recognized only
+one of the two `Number(...)` readers, so types with `float` fields (for
+example `DailyLogEntryWithMeals`) were missing fields in the bundled table.
 
-Wayback Machine has no archived snapshots of the CloudFront origin
-(`d3hsih69yn4d89.cloudfront.net`), so we cannot reconstruct a precise
-historical cadence. The 2011–2012 snapshots of `www.loseit.com/web/`
-predate the CloudFront migration and aren't relevant.
+## 4. Why a decoder at all
 
-In short: don't put this on a cron. Wait for the failure mode in §1 and
-react.
+Before the schema-driven decoder, `loseit search "kodiak"` picked fields by
+string-length heuristics (`brand = "Pancakes"`, `category = "Kodiak"`), which
+could serialize the wrong `FoodIdentifier` back to the server. Reading fields
+in declared order removes that class of bug.
