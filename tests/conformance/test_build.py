@@ -35,6 +35,7 @@ def _fresh_build_state(monkeypatch, tmp_path):
     monkeypatch.setattr(_build, "_schemas_by_build", {})
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.delenv("LOSEIT_AUTO_REFRESH", raising=False)
+    monkeypatch.setattr(_decoder, "_LIVE_LOOKUP_TRIED", set())
 
 
 def _wrap_main(js: str) -> str:
@@ -127,6 +128,34 @@ def test_post_rpc_auto_refresh_can_be_disabled(test_client, httpx_mock, monkeypa
     with pytest.raises(LoseItError, match="IncompatibleRemoteServiceException"):
         test_client.http.post_rpc("7|0|1|x|")
     assert len(httpx_mock.get_requests()) == 1
+
+
+def test_post_rpc_rediscovers_when_memoized_build_is_also_stale(
+    test_client, httpx_mock, monkeypatch
+):
+    """Process memo says build B; the server has moved on to C. Adopt C, not B."""
+    monkeypatch.setattr(_build, "_schemas_cached", lambda base, strong: {"schemas": {}})
+    monkeypatch.setattr(_build, "_live", _build.BuildIds("B" * 32, "C" * 32))
+    httpx_mock.add_response(url=SERVICE_URL, text=INCOMPATIBLE)
+    _mock_live_build(httpx_mock)
+    httpx_mock.add_response(url=SERVICE_URL, text="//OK[1,[],0,7]")
+
+    test_client.http.post_rpc(f"7|0|1|{test_client.config.policy_hash}|")
+
+    assert test_client.config.policy_hash == NEW_POLICY
+    assert test_client.config.strong_name == NEW_STRONG
+
+
+def test_decoder_miss_stays_keyerror_when_discovery_fails(monkeypatch):
+    monkeypatch.setattr(_decoder, "_CATALOG", None)
+
+    def failing_refresh(base_url=_build.BASE_URL, *, force=False):
+        raise _build.BuildDiscoveryError("offline")
+
+    monkeypatch.setattr(_build, "refresh", failing_refresh)
+    with pytest.raises(KeyError, match="No schema"):
+        _decoder._schema_for("com.loseit.core.client.model.Nope/1")
+    monkeypatch.setattr(_decoder, "_CATALOG", None)
 
 
 def test_decoder_miss_loads_live_schemas(monkeypatch):

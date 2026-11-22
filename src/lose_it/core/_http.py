@@ -137,14 +137,15 @@ class HttpClient:
             return self._post_once(payload.replace(f"|{stale}|", f"|{self.config.policy_hash}|"))
 
     def _adopt_live_build(self) -> bool:
-        """Point this client at the live build; False if it already was."""
+        """Point this client at the live build; False if it already was.
+
+        Always re-reads ``web.nocache.js``: the server just rejected our IDs,
+        so any memoized discovery may predate another redeploy.
+        """
         current = (self.config.strong_name, self.config.policy_hash)
-        ids = _build.refresh(self.config.base_url)
+        ids = _build.refresh(self.config.base_url, force=True)
         if (ids.strong_name, ids.policy_hash) == current:
-            # The memoized discovery predates another redeploy; look again.
-            ids = _build.refresh(self.config.base_url, force=True)
-            if (ids.strong_name, ids.policy_hash) == current:
-                return False
+            return False
         self.config = self.config.model_copy(
             update={"strong_name": ids.strong_name, "policy_hash": ids.policy_hash}
         )

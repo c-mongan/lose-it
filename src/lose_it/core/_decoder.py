@@ -55,6 +55,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
 
+from .._logging import logger
 from ._enums import label_for_ordinal
 from ._gwt import parse_response
 
@@ -110,18 +111,30 @@ def register_schemas(schemas: dict[str, dict[str, Any]]) -> None:
     _catalog().add(schemas)
 
 
+_LIVE_LOOKUP_TRIED: set[str] = set()
+
+
 def _schema_for(fqcn: str) -> _Schema:
     """Look up ``fqcn``; on a miss, load the live build's schemas once and retry.
 
     A type signature the bundled table lacks means Lose It! redeployed and a
     class changed shape, so the live bundles are the only correct source.
+    Each unknown signature triggers at most one fresh discovery per process.
+    If discovery fails (offline, CDN change), the miss stays a ``KeyError`` so
+    lenient decoding keeps returning partial results.
     """
     schema = _catalog().schemas.get(fqcn)
-    if schema is None:
+    if schema is None and fqcn not in _LIVE_LOOKUP_TRIED:
+        import httpx
+
         from . import _build
 
+        _LIVE_LOOKUP_TRIED.add(fqcn)
         if _build.auto_refresh_enabled():
-            _build.refresh()
+            try:
+                _build.refresh(force=True)
+            except (_build.BuildDiscoveryError, httpx.HTTPError, OSError) as exc:
+                logger.warning("Live schema lookup for {f} failed: {e}", f=fqcn, e=exc)
             schema = _catalog().schemas.get(fqcn)
     if schema is None:
         raise KeyError(f"No schema for {fqcn!r} in the bundled or live Lose It! build schemas.")
