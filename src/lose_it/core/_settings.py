@@ -70,7 +70,8 @@ class Settings(BaseSettings):
     user_name: str | None = None
     hours_from_gmt: int | None = None
 
-    # ── Per-build (refreshed when LoseIt redeploys) ──
+    # ── Per-build starting point; the HTTP layer adopts the live build's
+    # IDs on IncompatibleRemoteServiceException (see core/_build.py) ──
     policy_hash: str = "48B8773EE1A2315CAE592AD337015120"
     strong_name: str = "11A17D1DFC9DAA0636F4DEA4FB06063B"
 

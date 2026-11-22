@@ -111,8 +111,12 @@ class Client:
         *,
         transport: httpx.BaseTransport | None = None,
     ):
-        self.config = config
         self.http = HttpClient(config, token, transport=transport)
+
+    @property
+    def config(self) -> Config:
+        """The live config; tracks build IDs the HTTP layer refreshed."""
+        return self.http.config
 
     @classmethod
     def from_env(
@@ -164,7 +168,6 @@ class LoseIt:
     pre-built :class:`Config` and JWT.
     """
 
-    config: Config
     http: HttpClient
 
     def __init__(
@@ -174,8 +177,12 @@ class LoseIt:
         *,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        self.config = config
         self.http = HttpClient(config, token, transport=transport)
+
+    @property
+    def config(self) -> Config:
+        """The live config; tracks build IDs the HTTP layer refreshed."""
+        return self.http.config
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 

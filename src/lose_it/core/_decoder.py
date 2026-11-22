@@ -9,10 +9,11 @@ field lands in the right slot by construction.
 Inputs
 ------
 
-- ``_schemas.json``  — written by ``tools/extract_gwt_schemas.py``,
+- ``_schemas.json``  — written by ``loseit build --schemas-out``,
   contains ``{fqcn: {"deserialize_fn": "...", "fields": [...]}}`` for
   every Lose It! domain type plus all the relevant Java built-ins.
-  This file is the ground truth and changes only when Lose It! redeploys.
+  After a Lose It! redeploy, unknown types are filled in at runtime from
+  the live build (see :mod:`._build`).
 - A raw ``//OK[…]`` GWT-RPC response body, parsed via
   :func:`lose_it.core._gwt.parse_response` into a flat token
   list and a separate string table.
@@ -77,17 +78,20 @@ class _Catalog:
     permutation: str
     schemas: dict[str, _Schema] = field(default_factory=dict)
 
+    def add(self, schemas: dict[str, dict[str, Any]]) -> None:
+        for fqcn, info in schemas.items():
+            self.schemas[fqcn] = _Schema(
+                fqcn=fqcn,
+                fields=info["fields"],
+                is_enum=bool(info.get("is_enum", False)),
+            )
+
     @classmethod
     def load(cls) -> _Catalog:
         with resources.files(__package__).joinpath("_schemas.json").open() as f:
             data = json.load(f)
         cat = cls(permutation=data["permutation"])
-        for fqcn, info in data["schemas"].items():
-            cat.schemas[fqcn] = _Schema(
-                fqcn=fqcn,
-                fields=info["fields"],
-                is_enum=bool(info.get("is_enum", False)),
-            )
+        cat.add(data["schemas"])
         return cat
 
 
@@ -99,6 +103,29 @@ def _catalog() -> _Catalog:
     if _CATALOG is None:
         _CATALOG = _Catalog.load()
     return _CATALOG
+
+
+def register_schemas(schemas: dict[str, dict[str, Any]]) -> None:
+    """Overlay schemas extracted from the live build onto the bundled ones."""
+    _catalog().add(schemas)
+
+
+def _schema_for(fqcn: str) -> _Schema:
+    """Look up ``fqcn``; on a miss, load the live build's schemas once and retry.
+
+    A type signature the bundled table lacks means Lose It! redeployed and a
+    class changed shape, so the live bundles are the only correct source.
+    """
+    schema = _catalog().schemas.get(fqcn)
+    if schema is None:
+        from . import _build
+
+        if _build.auto_refresh_enabled():
+            _build.refresh()
+            schema = _catalog().schemas.get(fqcn)
+    if schema is None:
+        raise KeyError(f"No schema for {fqcn!r} in the bundled or live Lose It! build schemas.")
+    return schema
 
 
 # ── Built-in type handling ───────────────────────────────────────────────────
@@ -368,12 +395,7 @@ def _read_typed(reader: _Reader, fqcn: str) -> Any:
         obj["entries"] = entries
         return obj
 
-    schema = _catalog().schemas.get(fqcn)
-    if schema is None:
-        raise KeyError(
-            f"No schema for {fqcn!r}. Regenerate _schemas.json via "
-            "tools/extract_gwt_schemas.py — Lose It! may have added a new type."
-        )
+    schema = _schema_for(fqcn)
     # Enums encode their ordinal as one extra token consumed by the GWT
     # *instantiate* function (not the deserialize body). Mirror that here
     # before reading any other fields.
