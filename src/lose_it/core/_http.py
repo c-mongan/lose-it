@@ -18,6 +18,7 @@ the RPC + duration, ERROR captures non-OK responses with the body.
 from __future__ import annotations
 
 import re
+import threading
 import time
 
 import httpx
@@ -73,6 +74,7 @@ class HttpClient:
 
     def __init__(self, config: Config, token: str, *, transport: httpx.BaseTransport | None = None):
         self.config = config
+        self._adopt_lock = threading.Lock()
         self.token = token
         headers = {
             "content-type": "text/x-gwt-rpc; charset=UTF-8",
@@ -119,6 +121,11 @@ class HttpClient:
         live build's identifiers and resend the envelope once with the new
         policy hash. Disable with ``LOSEIT_AUTO_REFRESH=0``.
         """
+        # Policy hash is string-table entry 2 (``7|0|N|<base>|<policy>|…``).
+        fields = payload.split("|", 5)
+        sent_policy = self.config.policy_hash
+        if len(fields) > 4 and re.fullmatch(r"[0-9A-F]{32}", fields[4]):
+            sent_policy = fields[4]
         try:
             return self._post_once(payload)
         except LoseItError as exc:
@@ -126,15 +133,18 @@ class HttpClient:
                 raise
             if not _build.auto_refresh_enabled():
                 raise
-            stale = self.config.policy_hash
-            try:
-                adopted = self._adopt_live_build()
-            except (_build.BuildDiscoveryError, httpx.HTTPError) as discovery_exc:
-                logger.error("Lose It! build refresh failed: {e}", e=discovery_exc)
-                raise exc from discovery_exc
-            if not adopted:
-                raise
-            return self._post_once(payload.replace(f"|{stale}|", f"|{self.config.policy_hash}|"))
+            with self._adopt_lock:
+                # A concurrent call may already have moved this client on.
+                if self.config.policy_hash == sent_policy:
+                    try:
+                        adopted = self._adopt_live_build()
+                    except (_build.BuildDiscoveryError, httpx.HTTPError) as discovery_exc:
+                        logger.error("Lose It! build refresh failed: {e}", e=discovery_exc)
+                        raise exc from discovery_exc
+                    if not adopted:
+                        raise
+                current = self.config.policy_hash
+            return self._post_once(payload.replace(f"|{sent_policy}|", f"|{current}|"))
 
     def _adopt_live_build(self) -> bool:
         """Point this client at the live build; False if it already was.

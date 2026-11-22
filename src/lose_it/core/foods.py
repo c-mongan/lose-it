@@ -22,7 +22,7 @@ from typing import Any
 from .._logging import logger
 from ..models import FoodSearchResult, UnsavedFoodLogEntry
 from ._config import Config
-from ._decoder import decode_response
+from ._decoder import decode_response, semantic
 from ._gwt import build_envelope
 from ._http import HttpClient, LoseItError
 from ._ids import pk_to_hex
@@ -37,11 +37,11 @@ from ._ids import pk_to_hex
 # alters a class) would invalidate them — but the hash in the FQCN would
 # change too, surfacing the issue at the schema-extraction stage.
 
-_SEARCH_RESULT_FOOD = "com.loseit.core.client.model.search.SearchResultFood/3343986608"
-_SEARCH_RESULTS = "com.loseit.core.client.model.search.SearchResults/1258509077"
-_SIMPLE_PK = "com.loseit.core.client.model.SimplePrimaryKey/3621315060"
-_FOOD_IDENTIFIER = "com.loseit.core.client.model.FoodIdentifier/2763145970"
-_UNSAVED_FOOD_LOG_ENTRY = "com.loseit.core.client.model.FoodLogEntry/264522954"
+_SEARCH_RESULT_FOOD = semantic("com.loseit.core.client.model.search.SearchResultFood/3343986608")
+_SEARCH_RESULTS = semantic("com.loseit.core.client.model.search.SearchResults/1258509077")
+_SIMPLE_PK = semantic("com.loseit.core.client.model.SimplePrimaryKey/3621315060")
+_FOOD_IDENTIFIER = semantic("com.loseit.core.client.model.FoodIdentifier/2763145970")
+_UNSAVED_FOOD_LOG_ENTRY = semantic("com.loseit.core.client.model.FoodLogEntry/264522954")
 
 
 # ── searchFoods ─────────────────────────────────────────────────────────────

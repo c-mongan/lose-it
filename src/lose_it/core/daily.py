@@ -25,14 +25,15 @@ from .._logging import logger
 from ..models import FoodLogEntry
 from ._config import Config
 from ._dates import day_number_for
-from ._decoder import decode_response
+from ._decoder import decode_response, semantic
 from ._gwt import build_envelope, parse_response
 from ._http import HttpClient, LoseItError
 from .init import _FALLBACK_DAY_KEY, get_daydate_key
 
-# Type hashes used to walk the decoder's output.
-_FLE_FQCN = "com.loseit.core.client.model.FoodLogEntry/264522954"
-_FOOD_SERVING_SIZE_FQCN = "com.loseit.core.client.model.FoodServingSize/63998910"
+# Type hashes used to walk the decoder's output. ``semantic`` pins the ones
+# read by field position, so a redeploy that reshapes them fails loudly.
+_FLE_FQCN = semantic("com.loseit.core.client.model.FoodLogEntry/264522954")
+_FOOD_SERVING_SIZE_FQCN = semantic("com.loseit.core.client.model.FoodServingSize/63998910")
 _FOOD_MEASURE_PREFIX = "com.loseit.core.client.model.FoodMeasure/"
 _DATE_FQCN = "java.util.Date/3385151746"
 

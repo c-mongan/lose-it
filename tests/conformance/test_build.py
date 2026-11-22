@@ -140,10 +140,33 @@ def test_post_rpc_rediscovers_when_memoized_build_is_also_stale(
     _mock_live_build(httpx_mock)
     httpx_mock.add_response(url=SERVICE_URL, text="//OK[1,[],0,7]")
 
-    test_client.http.post_rpc(f"7|0|1|{test_client.config.policy_hash}|")
+    test_client.http.post_rpc(f"7|0|2|{BASE}|{test_client.config.policy_hash}|")
 
     assert test_client.config.policy_hash == NEW_POLICY
     assert test_client.config.strong_name == NEW_STRONG
+
+
+def test_post_rpc_retries_envelope_built_before_a_concurrent_adoption(test_client, httpx_mock):
+    """Another call already adopted the live build; a stale envelope still gets one retry."""
+    stale = test_client.config.policy_hash
+    test_client.http.config = test_client.http.config.model_copy(
+        update={"policy_hash": NEW_POLICY, "strong_name": NEW_STRONG}
+    )
+    httpx_mock.add_response(url=SERVICE_URL, text=INCOMPATIBLE)
+    httpx_mock.add_response(url=SERVICE_URL, text="//OK[1,[],0,7]")
+
+    assert test_client.http.post_rpc(f"7|0|2|{BASE}|{stale}|") == "//OK[1,[],0,7]"
+    retry = httpx_mock.get_requests(url=SERVICE_URL)[-1].content.decode()
+    assert f"|{NEW_POLICY}|" in retry
+    assert len(httpx_mock.get_requests()) == 2  # no rediscovery needed
+
+
+def test_reshaped_positional_type_fails_loudly(monkeypatch):
+    """A FoodLogEntry with a new signature must not decode into silently empty data."""
+    monkeypatch.setattr(_decoder, "_CATALOG", None)
+    with pytest.raises(_decoder.SchemaChangedError, match="FoodLogEntry/1"):
+        _decoder._schema_for("com.loseit.core.client.model.FoodLogEntry/1")
+    monkeypatch.setattr(_decoder, "_CATALOG", None)
 
 
 def test_decoder_miss_stays_keyerror_when_discovery_fails(monkeypatch):
